@@ -7,7 +7,30 @@
 
 ; External dependencies
 ; ==========================================================
-(load "functionParser.scm")
+(load "classParser.scm")
+
+(define interpret_classes
+  (λ (filename classname)
+    ((λ (state_cont return_cont continue_cont break_cont throw_cont)
+      (interpret_class_ast (state_push_scope (state_empty)) (parser filename)
+                     (λ (s) (call_function s 'main '() state_cont return_cont continue_cont break_cont throw_cont classname))
+                     return_cont
+                     continue_cont
+                     break_cont
+                     throw_cont))
+     (λ (v) v); (error "No return statement encountered"))
+     (λ (v) (pretty_value v))
+     (λ (v) (error "Continue encountered outside of loop"))
+     (λ (v) (error "Break encountered outside of loop"))
+     (λ (v) (error "Uncaught throw")))))
+
+(define interpret_class_ast
+  (λ (state expression state_cont return_cont continue_cont break_cont throw_cont)
+    (cond
+      ((eq? expression '()) (state_cont state))
+      (else
+       (interpret_class_ast (state_decl_class state (cadar expression) (build_class expression)) (cdr expression) state_cont return_cont continue_cont break_cont throw_cont)))))
+    
 
 ; Public "API"
 ; ==========================================================
@@ -21,6 +44,7 @@
 ; of loop, or a throw statement is outside of a try/catch block. 
 ;
 ; filename: the name of the input file.
+; classname: the name of the class with the main method to call into.
 (define interpret
   (λ (filename)
     ((λ (state_cont return_cont continue_cont break_cont throw_cont)
@@ -99,6 +123,7 @@
       ((eq? 'function (operator statement)) (interpret_function state statement state_cont return_cont continue_cont break_cont throw_cont))
       ((eq? 'funcall (operator statement)) (call_function state (operand_1 statement) (cddr statement) state_cont (λ (v) (state_cont state))
                                                           continue_cont break_cont throw_cont))
+      ((eq? 'class (operator statement)) (state_cont (interpret_class state statement continue_cont break_cont throw_cont)))
       (else (error "invalid statement")))))
 
 ; Interprets a function definition.
@@ -122,8 +147,10 @@
 ; return_cont: return continuation function.
 ; break_cont: break continuation function.
 ; throw_cont: throw_continuation function.
+; class TODO
 (define call_function
-  (λ (state name args state_cont return_cont continue_cont break_cont throw_cont)
+  (λ (state name args state_cont return_cont continue_cont break_cont throw_cont class)
+    ;(display (state_classes state))
     ((λ (func)
        (interpret_ast (function_closure state func args continue_cont break_cont throw_cont) (caddr func)
                       state_cont
@@ -131,7 +158,8 @@
                       (λ (v) (error "Continue encountered outside of loop"))
                       (λ (v) (error "Break encountered outside of loop"))
                       throw_cont))
-     (state_lookup_function state name))))
+     (class_lookup_function (state_lookup_class state class) name))))
+     ;(state_lookup_function state name class))))
 
 ; Binds params to their formal params.
 ; state: the current program state.
@@ -267,6 +295,30 @@
                    (λ (v) (continue_cont (state_pop_scope v)))
                    (λ (v) (break_cont (state_pop_scope v)))
                    (λ (v) (throw_cont v)))))
+
+; Interprets a class declaration.
+; Throws an error if: classes are declared multiple times.
+;
+; state: the current program state.
+; statement: a properly formed abstract syntax tree block statement.
+(define interpret_class
+  (λ (state statement continue_cont break_cont throw_cont)
+     ;(display statement)
+    (declare_class state
+                      (operand_1 statement)
+                      (operand_2 statement)
+                      (operand_3 statement)
+                      continue_cont break_cont throw_cont)))
+
+; Declares a class.
+(define declare_class
+  (λ (state name class continue_cont break_cont throw_cont)
+    (state_stack_level_replace (car (state_stack state)) name class
+                               (λ () (error "class already declared:" name))
+                               (λ () (state_add state name
+                                                (if has_val
+                                                    (value state val continue_cont break_cont throw_cont)
+                                                    null))))))
 
 ; Interprets a var declaration.
 ; Throws an error if: variables are declared multiple times.
@@ -490,6 +542,11 @@
   (λ (expression)
     (not (null? (cddr expression)))))
 
+; Gets the parent class name from the expression.
+(define parentname
+  (λ (expression)
+    (cdr expression)))
+
 ; Gets the value of a variable in a specific level of the state.
 ; s: state stack.
 ; name: the name of the variable.
@@ -523,6 +580,22 @@
 (define state_value
   (λ (state name)
     (state_stack_value (state_stack state) name)))
+
+(define class_function_value
+  (λ (funcs name)
+    (display funcs)
+    (cond
+      ((null? funcs) (error "undefined function in class" name))
+      ((eq? (cadar funcs) name) (unbox (caddar funcs)))
+      (else (class_function_value (cdr funcs) name)))))
+
+(define state_class_value
+  (λ (classes name)
+    (cond
+      ((null? classes) (error "undefined class in state" name))
+      ((eq? (caar classes) name) (unbox (cadar classes)))
+      (else (state_class_value (cdr classes) name)))))
+        
 
 ; Adds the specified value to the state s mapped to the specified variable
 ; in the current scope.
@@ -589,10 +662,28 @@
   (λ (state name)
     (state_stack_value (state_functions state) name)))  
 
+; Declares a class
+(define state_decl_class
+  (λ (state name value)
+    (state_stack_update (state_classes state) name value
+                        (λ () (error "Class with this name already exists"))
+                        (λ () ((λ (stack)
+                                  (state_build (cons (state_stack_level_add (car stack) name (box value)) (cdr stack)) (state_functions state) (state_stack state)))
+                                (state_classes state))))))
+
+(define state_lookup_class
+  (λ (state name)
+    (state_class_value (car (state_classes state)) name))) ;TODO
+
+; Looks up a function in a class
+(define class_lookup_function
+  (λ (class name)
+    (class_function_value (class_functions class) name)))
+
 ; Wrapper for state_stack_push_scope
 (define state_push_scope
   (λ (state)
-    (state_build (cons '() (state_functions state)) (cons '() (state_stack state)))))
+    (state_build (cons '() (state_classes state)) (cons '() (state_functions state)) (cons '() (state_stack state)))))
 
 (define state_pop_scope
   (λ (state)
@@ -600,18 +691,24 @@
 
 ; An empty state.
 (define state_empty
-  (λ () (state_build '() '())))
+  (λ () (state_build '() '() '())))
 
 ; Gets the stack of state variables and functions.
-(define state_stack cadr)
+(define state_stack caddr)
 
 ; Gets the function variables from the state.
-(define state_functions car)
+(define state_functions cadr)
+
+; Gets the classes from the state.
+(define state_classes car)
+
+; Gets the functions from the class.
+(define class_functions cddr)
 
 ; Builds a new state object.
 (define state_build
-  (λ (functions stack)
-    (cons functions (cons stack '()))))
+  (λ (classes functions stack)
+    (cons classes (cons functions (cons stack '())))))
 
 ; Checks if the current scope is top level.
 ; If the current scope is top level, returns #t.
@@ -631,3 +728,19 @@
 (define state_topmost_state
   (λ (state)
     (state_build (cons (last (state_functions state)) '()) (cons (last (state_stack state)) '()))))
+
+;Builds a class
+(define build_class
+  (λ (expression)
+    (if (null? (caddar expression))
+        (cons '() (get_class_items (car (cdddar expression)) '() '() ))
+        (cons (parentname (caddar expression)) (get_class_items (car (cdddar expression)) '() '() )))))
+
+(define get_class_items
+  (λ (expression fields methods)
+    ;(display (caar expression))
+    (cond
+      ((eq? expression '()) (cons fields methods))
+      ((eq? 'var (caar expression)) (get_class_items (cdr expression) (cons (operator (car expression)) fields) methods))
+      ((eq? 'static-function (operator (car expression))) (get_class_items (cdr expression) fields (cons (car expression) methods)))
+      (else (error "unknown")))))
