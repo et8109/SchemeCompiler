@@ -583,10 +583,10 @@
 
 (define class_function_value
   (λ (funcs name)
-    (display funcs)
+    (display (cdar funcs))
     (cond
       ((null? funcs) (error "undefined function in class" name))
-      ((eq? (cadar funcs) name) (unbox (caddar funcs)))
+      ((eq? (cadar funcs) name) (cdar funcs))
       (else (class_function_value (cdr funcs) name)))))
 
 (define state_class_value
@@ -727,7 +727,7 @@
 ; Gets a new state containing only the topmost functions and vars.
 (define state_topmost_state
   (λ (state)
-    (state_build (cons (last (state_functions state)) '()) (cons (last (state_stack state)) '()))))
+    (state_build (cons (last (state_classes state)) '()) (cons (last (state_functions state)) '()) (cons (last (state_stack state)) '()))))
 
 ;Builds a class
 (define build_class
